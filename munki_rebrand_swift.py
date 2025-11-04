@@ -192,10 +192,13 @@ def replace_strings(strings_file, code, appname):
     backup_file = f"{strings_file}.bak"
     enc = guess_encoding(strings_file)
 
+    # Could do this in place but im oldskool so
     with io.open(backup_file, "w", encoding=enc) as fw, io.open(
         strings_file, "r", encoding=enc
     ) as fr:
         for line in fr:
+            # We want to only replace on the right hand side of any =
+            # and we don't want to do it to a comment
             if "=" in line and not line.startswith("/*"):
                 left, right = line.split("=")
                 right = right.replace(localized, appname)
@@ -205,6 +208,7 @@ def replace_strings(strings_file, code, appname):
     os.rename(backup_file, strings_file)
 
 def icon_test(png):
+    # EXACT COPY from original script - Check if icon is png
     with open(png, "rb") as f:
         pngbin = f.read()
     if pngbin[:8] == b'\x89PNG\r\n\x1a\n' and pngbin[12:16] == b'IHDR':
@@ -246,7 +250,11 @@ def convert_to_icns(png, output_dir, actool=""):
         contents["images"].append(image)
     icnspath = os.path.join(icon_dir, "AppIcon.icns")
 
+    # Munki 3.6+ has an Assets.car which is compiled from the Assets.xcassets
+    # to provide the AppIcon
     if actool:
+        # Use context of the location of munki_rebrand.py to find the Assets.xcassets
+        # directory.
         rebrand_dir = os.path.dirname(os.path.abspath(__file__))
         xc_assets_dir = os.path.join(rebrand_dir, "Assets.xcassets/")
         if not os.path.isdir(xc_assets_dir):
@@ -299,7 +307,7 @@ def remove_signature(app_path):
             print(f"Warning: Could not remove signature from {app_path}")
 
 def sign_binary(signing_id, binary, verbose=False, deep=False, options=[], entitlements="", force=False):
-    """Signs a binary with a signing id"""
+    """EXACT COPY from original script - Signs a binary with a signing id, with optional arguments for command line args"""
     cmd = [CODESIGN, "--sign", signing_id]
     if force:
         cmd.append("--force")
@@ -314,13 +322,7 @@ def sign_binary(signing_id, binary, verbose=False, deep=False, options=[], entit
         cmd.append("--options")
         cmd.append(",".join([option for option in options]))
     cmd.append(binary)
-    
-    try:
-        run_cmd(cmd)
-        if verbose:
-            print(f"Successfully signed: {binary}")
-    except Exception as e:
-        print(f"Failed to sign {binary}: {e}")
+    run_cmd(cmd)
 
 def sign_app(app_path, signing_id=None):
     """Re-sign application with proper entitlements for Swift apps"""
@@ -348,9 +350,16 @@ def sign_app(app_path, signing_id=None):
     
     try:
         run_cmd(cmd)
-        print(f"Successfully signed app: {os.path.basename(app_path)}")
-    except Exception as e:
-        print(f"Failed to sign app {os.path.basename(app_path)}: {e}")
+    except:
+        print(f"Warning: Could not sign {app_path}")
+
+def sign_package(signing_id, pkg):
+    """EXACT COPY from original script - Signs a pkg with a signing id"""
+    cmd = [PRODUCTSIGN, "--sign", signing_id, pkg, f"{pkg}-signed"]
+    print("Signing pkg...")
+    run_cmd(cmd)
+    print(f"Moving {pkg}-signed to {pkg}...")
+    os.rename(f"{pkg}-signed", pkg)
 
 def update_app_display_name(app_path, new_name):
     """Update the app's display name in Info.plist"""
@@ -425,97 +434,115 @@ def rename_app_bundle(app_pkg, old_path, new_path):
             print(f"App not found for renaming: {old_app_dir}")
         return False
 
-def find_and_sign_binaries(signing_id, root_dir, appname):
-    """Find and sign all binaries in the package"""
-    print(f"Signing binaries with: {signing_id}")
+def sign_all_binaries(signing_id, root_dir, appname):
+    """Comprehensive binary signing from original script"""
+    print("Signing binaries (this may take a while)...")
     
-    # Create entitlements file
+    # Find all packages
+    app_pkg = glob.glob(os.path.join(root_dir, "munkitools_app*"))[0]
+    core_pkg = glob.glob(os.path.join(root_dir, "munkitools_core*"))[0]
+    python_pkg = glob.glob(os.path.join(root_dir, "munkitools_python*"))[0]
+
+    app_payload = os.path.join(app_pkg, "Payload")
+    core_payload = os.path.join(core_pkg, "Payload")
+    python_payload = os.path.join(python_pkg, "Payload")
+
+    # Generate entitlements file for later
     entitlements = {
-        "com.apple.security.cs.allow-unsigned-executable-memory": True,
-        "com.apple.security.cs.allow-dyld-environment-variables": True,
+        "com.apple.security.cs.allow-unsigned-executable-memory": True
     }
     ent_file = os.path.join(tmp_dir, "entitlements.plist")
     with open(ent_file, 'wb') as f:
         plistlib.dump(entitlements, f)
+
+    # Add the MSC app pkg binaries
+    binaries = [
+        os.path.join(
+            app_payload,
+            "Applications",
+            f"{appname}.app",
+            "Contents/PlugIns/MSCDockTilePlugin.docktileplugin",
+        ),
+        os.path.join(
+            app_payload,
+            "Applications", 
+            f"{appname}.app",
+            "Contents/Helpers/munki-notifier.app",
+        ),
+        os.path.join(
+            app_payload,
+            "Applications",
+            f"{appname}.app", 
+            "Contents/Helpers/MunkiStatus.app",
+        ),
+        os.path.join(
+            app_payload,
+            "Applications",
+            f"{appname}.app",
+        ),
+    ]
     
-    # Find all binaries to sign
-    binaries_to_sign = []
-    
-    # Look through all package directories
-    for package_dir in os.listdir(root_dir):
-        package_path = os.path.join(root_dir, package_dir)
-        if os.path.isdir(package_path):
-            payload_dir = os.path.join(package_path, "Payload")
-            if os.path.exists(payload_dir):
-                # Walk through all files in payload
-                for root, dirs, files in os.walk(payload_dir):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        
-                        # Check if it's a Mach-O binary
-                        if os.path.isfile(file_path) and not os.path.islink(file_path):
-                            try:
-                                # Use file command to check if it's a Mach-O binary
-                                result = subprocess.run(
-                                    ['file', '-b', file_path], 
-                                    capture_output=True, 
-                                    text=True
-                                )
-                                if 'Mach-O' in result.stdout:
-                                    binaries_to_sign.append(file_path)
-                                    if verbose:
-                                        print(f"  Found binary: {file_path}")
-                            except:
-                                pass
-    
-    # Remove duplicates and sort for consistent ordering
-    binaries_to_sign = sorted(list(set(binaries_to_sign)))
-    
-    print(f"Found {len(binaries_to_sign)} binaries to sign")
-    
-    # Sign all binaries
-    for binary in binaries_to_sign:
-        try:
+    # In munki 5.3 and higher, managedsoftwareupdate is a signable binary
+    msu = os.path.join(
+            core_payload,
+            MUNKI_PATH,
+            "managedsoftwareupdate",
+        )
+    if is_binary(msu):
+        binaries.append(msu)
+
+    # Add the executable libs and bins in python pkg
+    pylib = os.path.join(python_payload, PY_CUR, "lib")
+    pybin = os.path.join(python_payload, PY_CUR, "bin")
+    for pydir in [pylib, pybin]:
+        if os.path.exists(pydir):
+            for f in os.listdir(pydir):
+                if is_signable_bin(os.path.join(pydir, f)):
+                    binaries.append(os.path.join(pydir, f))
+            for root, dirs, files in os.walk(pydir):
+                for file_ in files:
+                    if is_signable_lib(os.path.join(root, file_)):
+                        binaries.append(os.path.join(root, file_))
+
+    # Add binaries which need entitlements
+    entitled_binaries = [
+        os.path.join(python_payload, PY_CUR, "Resources/Python.app"),
+        os.path.join(pybin, "python3"),
+    ]
+
+    # Sign all the binaries. The order is important. Which is why this is a bit
+    # gross
+    for binary in binaries:
+        if os.path.exists(binary):
             if verbose:
-                print(f"  Signing: {os.path.basename(binary)}")
-            
-            # Remove existing signature first
-            try:
-                subprocess.run([CODESIGN, "--remove-signature", binary], 
-                             capture_output=True, check=False)
-            except:
-                pass
-            
-            # Sign with entitlements for important binaries
-            if 'Python' in binary or 'python' in binary:
-                sign_binary(signing_id, binary, deep=False, force=True, 
-                           options=["runtime"], entitlements=ent_file)
-            else:
-                sign_binary(signing_id, binary, deep=False, force=True, 
-                           options=["runtime"])
-            
-        except Exception as e:
-            print(f"  Failed to sign {binary}: {e}")
+                print(f"Signing {binary}...")
+            sign_binary(
+                signing_id,
+                binary,
+                deep=True,
+                force=True,
+                options=["runtime"],
+            )
+
+    for binary in entitled_binaries:
+        if os.path.exists(binary):
+            if verbose:
+                print(f"Signing {binary} with entitlements from {ent_file}...")
+            sign_binary(
+                signing_id,
+                binary,
+                deep=True,
+                force=True,
+                options=["runtime"],
+                entitlements=ent_file,
+            )
     
-    # Now sign the main apps with deep signing
-    print("Signing main applications with deep signing...")
-    
-    # Find and sign main apps
-    main_apps = []
-    for app_pkg in find_app_packages(root_dir):
-        for app in get_app_paths(appname):
-            app_path = app.get("new_path", app["path"])
-            full_app_path = os.path.join(app_pkg, app_path)
-            if os.path.exists(full_app_path):
-                main_apps.append(full_app_path)
-    
-    for app_path in main_apps:
-        try:
-            print(f"  Deep signing: {os.path.basename(app_path)}")
-            sign_binary(signing_id, app_path, deep=True, force=True, 
-                       options=["runtime"], entitlements=ent_file)
-        except Exception as e:
-            print(f" Failed to deep sign {app_path}: {e}")
+    # Finally sign python framework
+    py_fwkpath = os.path.join(python_payload, PY_FWK)
+    if os.path.exists(py_fwkpath):
+        if verbose:
+            print(f"Signing {py_fwkpath}...")
+        sign_binary(signing_id, py_fwkpath, deep=True, force=True)
 
 def get_current_user():
     """Get the current non-root username"""
@@ -558,6 +585,31 @@ def sign_package_as_user(pkg_path, signing_id, user=None):
         print(f"Signing error: {e}")
         return None
 
+def sign_apps_as_user(app_path, signing_id, user=None):
+    """Sign apps as the specified user"""
+    if not user:
+        user = get_current_user()
+    
+    print(f"📝 Signing apps as user '{user}'...")
+    
+    apps_to_sign = [
+        app_path,
+        os.path.join(app_path, "Contents/Helpers/MunkiStatus.app"),
+        os.path.join(app_path, "Contents/Helpers/munki-notifier.app")
+    ]
+    
+    for app in apps_to_sign:
+        if os.path.exists(app):
+            cmd = f'sudo -u {user} codesign --deep --force --options runtime --sign "{signing_id}" "{app}"'
+            try:
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+                if result.returncode == 0:
+                    print(f"✅ Signed: {os.path.basename(app)}")
+                else:
+                    print(f"⚠️  Failed to sign {os.path.basename(app)}: {result.stderr}")
+            except Exception as e:
+                print(f"⚠️  Error signing {os.path.basename(app)}: {e}")
+
 def main():
     p = argparse.ArgumentParser(
         description="Rebrands Munki's Managed Software Center for Swift-based MSC (Munki 7+)"
@@ -590,7 +642,7 @@ def main():
     
     # Get the user for signing
     sign_user = args.user or get_current_user()
-    print(f"Will sign packages as user: {sign_user}")
+    print(f"👤 Will sign packages as user: {sign_user}")
 
     # Set output filename
     outfilename = args.output_file or "munkitools"
@@ -612,7 +664,7 @@ def main():
             "Munki 3.6 and higher. See README for more info."
         )
 
-    # Process icon file if provided
+    # Process icon file if provided - EXACT COPY from original script
     icns = None
     car = None
     if args.icon_file and os.path.isfile(args.icon_file):
@@ -641,7 +693,7 @@ def main():
     root_dir = os.path.join(tmp_dir, "root")
     expand_pkg(args.pkg, root_dir)
 
-    # Find app packages
+    # Find app packages in Munki 7+ structure
     app_packages = find_app_packages(root_dir)
     
     if not app_packages:
@@ -689,7 +741,7 @@ def main():
                     main_app_renamed = True
                     break
         
-        # Process each app
+        # Icon handling
         for app in APPS:
             # Use the new path if available, otherwise use old path
             app_path = app.get("new_path", app["path"])
@@ -704,7 +756,7 @@ def main():
                 # Update display name in Info.plist
                 update_app_display_name(app_dir, args.appname)
                 
-                # Update localized strings
+                # Update localized strings - EXACT COPY from original script
                 resources_dir = os.path.join(app_dir, "Contents/Resources")
                 if os.path.exists(resources_dir):
                     # Get a list of all the lproj dirs in each app's Resources dir
@@ -720,7 +772,7 @@ def main():
                                     if fnmatch.fnmatch(lfile, "*.strings"):
                                         replace_strings(lfile, code, args.appname)
                 
-                # Icon replacement
+                # EXACT COPY from original script for icon replacement
                 if args.icon_file:
                     if icns:
                         for icon in app["icon"]:
@@ -738,16 +790,17 @@ def main():
                             shutil.copyfile(car, car_path)
                             print(f"Replacing icons in {car_path} with {car}...")
                 
+                # Re-sign app with simple method first
+                sign_app(app_dir, args.sign_binaries)
+                
                 apps_processed += 1
             else:
                 if verbose:
                     print(f"  App not found: {app_dir}")
 
-    # Sign binaries if requested - DO THIS BEFORE REBUILDING PACKAGE
+    # Comprehensive binary signing if requested
     if args.sign_binaries:
-        print("Starting binary signing process...")
-        find_and_sign_binaries(args.sign_binaries, root_dir, args.appname)
-        print("Binary signing completed")
+        sign_all_binaries(args.sign_binaries, root_dir, args.appname)
 
     if apps_processed == 0:
         print("No apps were processed! Checking package structure...")
@@ -771,10 +824,9 @@ def main():
 
     # Rebuild package
     final_pkg = f"{outfilename}-{munki_version}.pkg"
-    print(f"Rebuilding package: {final_pkg}")
     flatten_pkg(root_dir, final_pkg)
 
-    # Handle package signing if requested
+    # Handle signing if requested
     signed_pkg = final_pkg
     if args.sign_package:
         signed_pkg = sign_package_as_user(final_pkg, args.sign_package, sign_user)
@@ -782,7 +834,12 @@ def main():
             print("Package signing failed, using unsigned package")
             signed_pkg = final_pkg
 
-    print(f"Successfully created: {signed_pkg}")
+    # Sign apps if requested
+    if args.sign_binaries:
+        app_path = f"/Applications/{args.appname}.app"
+        sign_apps_as_user(app_path, args.sign_binaries, sign_user)
+
+    print(f"Successfully created and installed: {signed_pkg}")
     print(f"App name changed to: {args.appname}")
     if args.sign_package:
         print(f"Package signed with: {args.sign_package}")
@@ -790,7 +847,6 @@ def main():
         print(f"Binaries signed with: {args.sign_binaries}")
     if icns:
         print(f"Custom icon applied")
-    print(f"\n Package ready for distribution: {signed_pkg}")
 
 if __name__ == "__main__":
     main()
