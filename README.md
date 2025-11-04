@@ -8,7 +8,7 @@ usage: munki_rebrand_swift.py [-h] -a APPNAME [-k PKG] [-i ICON_FILE] [--identif
                               [-x]
 
 Rebrands Munki's Managed Software Center for Swift-based MSC (Munki 7+)
-
+```
 options:
   -h, --help            show this help message and exit
   -a APPNAME, --appname APPNAME
@@ -27,7 +27,7 @@ options:
   -u USER, --user USER  Username to use for signing (default: current sudo user)
   -v, --verbose         Be more verbose
   -x, --version         Print version and exit
-
+```
   i.e.
 
   sudo ./munki_rebrand_swift.py --appname "My New App Store" -v
