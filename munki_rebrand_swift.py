@@ -4,7 +4,7 @@
 munki_rebrand_swift.py
 
 Script to rebrand and customise Munki's Managed Software Center (Munki 7+)
-Compatible with macOS 26 (Sequoia)
+Compatible with macOS 26
 """
 
 import subprocess
