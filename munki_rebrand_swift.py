@@ -4,7 +4,7 @@
 munki_rebrand_swift.py
 
 Script to rebrand and customise Munki's Managed Software Center (Munki 7+)
-Compatible with macOS 26
+Compatible with macOS 26 
 """
 
 import subprocess
@@ -839,7 +839,6 @@ def main():
     final_pkg = f"{outfilename}-{munki_version}.pkg"
     flatten_pkg(root_dir, final_pkg)
 
-    # Handle signing if requested
     signed_pkg = final_pkg
     if args.sign_package:
         signed_pkg = sign_package_as_user(final_pkg, args.sign_package, sign_user)
@@ -847,7 +846,6 @@ def main():
             print("Package signing failed, using unsigned package")
             signed_pkg = final_pkg
 
-    # Comprehensive binary signing if requested
     if args.sign_binaries:
         sign_all_binaries(args.sign_binaries, root_dir, args.appname)
 
