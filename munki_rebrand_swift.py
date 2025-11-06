@@ -4,6 +4,7 @@
 munki_rebrand_swift.py
 
 Script to rebrand and customise Munki's Managed Software Center (Munki 7+)
+Compatible with macOS 26 (Sequoia)
 """
 
 import subprocess
@@ -21,8 +22,10 @@ import fnmatch
 import io
 import json
 import getpass
+import hashlib
+import uuid
 
-VERSION = "7.0"
+VERSION = "7.1"
 
 APPNAME_LOCALIZED = {
     "Base": "Managed Software Center",
@@ -110,6 +113,10 @@ MUNKIURL = "https://api.github.com/repos/munki/munki/releases/latest"
 global verbose
 verbose = False
 tmp_dir = mkdtemp()
+
+# Global variables for icon handling
+icns = None
+car = None
 
 @atexit.register
 def cleanup():
@@ -208,7 +215,6 @@ def replace_strings(strings_file, code, appname):
     os.rename(backup_file, strings_file)
 
 def icon_test(png):
-    # EXACT COPY from original script - Check if icon is png
     with open(png, "rb") as f:
         pngbin = f.read()
     if pngbin[:8] == b'\x89PNG\r\n\x1a\n' and pngbin[12:16] == b'IHDR':
@@ -366,29 +372,90 @@ def update_app_display_name(app_path, new_name):
     info_plist = os.path.join(app_path, "Contents/Info.plist")
     if os.path.isfile(info_plist):
         try:
-            # Read existing plist
             with open(info_plist, 'rb') as f:
                 plist = plistlib.load(f)
             
-            # Update display names
             plist['CFBundleDisplayName'] = new_name
             plist['CFBundleName'] = new_name
             
-            # Write back
             with open(info_plist, 'wb') as f:
                 plistlib.dump(plist, f)
                 
             if verbose:
-                print(f"  Updated Info.plist for {os.path.basename(app_path)}")
+                print(f"  Updated display name to '{new_name}'")
                 
         except Exception as e:
             print(f"Warning: Could not update Info.plist for {app_path}: {e}")
+
+def create_custom_bundle_identifier(app_path, new_name):
+    """Create a completely custom bundle identifier for macOS 26 compatibility"""
+    info_plist = os.path.join(app_path, "Contents/Info.plist")
+    if os.path.isfile(info_plist):
+        try:
+            with open(info_plist, 'rb') as f:
+                plist = plistlib.load(f)
+            
+            # Generate a unique identifier
+            unique_id = hashlib.md5(f"{new_name}_{uuid.uuid4()}".encode()).hexdigest()[:12]
+            new_bundle_id = f"custom.munki.rebrand.{unique_id}"
+            
+            plist['CFBundleIdentifier'] = new_bundle_id
+            
+            # Update URL handlers if they exist
+            if 'CFBundleURLTypes' in plist:
+                for url_type in plist['CFBundleURLTypes']:
+                    if 'CFBundleURLName' in url_type:
+                        url_type['CFBundleURLName'] = new_bundle_id
+            
+            with open(info_plist, 'wb') as f:
+                plistlib.dump(plist, f)
+                
+            print(f"  Updated CFBundleIdentifier to: {new_bundle_id}")
+            return new_bundle_id
+                
+        except Exception as e:
+            print(f"Warning: Could not update bundle identifier for {app_path}: {e}")
+    return None
+
+def rename_app_bundle_safe(app_pkg, old_path, new_path):
+    """Safely rename the .app bundle for macOS 26 compatibility"""
+    old_app_dir = os.path.join(app_pkg, old_path)
+    new_app_dir = os.path.join(app_pkg, new_path)
+    
+    if os.path.exists(old_app_dir) and not os.path.exists(new_app_dir):
+        print(f"Renaming app bundle: {os.path.basename(old_app_dir)} -> {os.path.basename(new_app_dir)}")
+        
+        # Copy instead of move to avoid path issues during processing
+        shutil.copytree(old_app_dir, new_app_dir, symlinks=True)
+        
+        # Remove the old app
+        shutil.rmtree(old_app_dir)
+        
+        return True
+    elif os.path.exists(new_app_dir):
+        if verbose:
+            print(f"App already renamed: {os.path.basename(new_app_dir)}")
+        return True
+    else:
+        if verbose:
+            print(f"App not found for renaming: {old_app_dir}")
+        return False
+
+def refresh_launch_services():
+    """Refresh LaunchServices database to pick up changes"""
+    print("Refreshing LaunchServices database...")
+    cmd = ["/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister", 
+           "-kill", "-r", "-domain", "local", "-domain", "system", "-domain", "user"]
+    try:
+        run_cmd(cmd)
+        print("LaunchServices database refreshed")
+    except:
+        print("Warning: Could not refresh LaunchServices database")
 
 def find_app_packages(root_dir):
     """Find all packages that contain apps in Munki 7+ structure"""
     app_packages = []
     
-    # Look for packages that might contain apps
     possible_patterns = [
         "munkitools_app*",
         "munkitools_app_usage*", 
@@ -416,26 +483,82 @@ def find_app_packages(root_dir):
     
     return app_packages
 
-def rename_app_bundle(app_pkg, old_path, new_path):
-    """Actually rename the .app bundle"""
-    old_app_dir = os.path.join(app_pkg, old_path)
-    new_app_dir = os.path.join(app_pkg, new_path)
+def process_apps_for_macos26(app_pkg, appname, icon_file=None, sign_binaries=None):
+    """Process apps with macOS 26 compatible approach - actual bundle renaming"""
     
-    if os.path.exists(old_app_dir) and not os.path.exists(new_app_dir):
-        print(f"Renaming app bundle: {os.path.basename(old_app_dir)} -> {os.path.basename(new_app_dir)}")
-        shutil.move(old_app_dir, new_app_dir)
-        return True
-    elif os.path.exists(new_app_dir):
-        if verbose:
-            print(f"App already renamed: {os.path.basename(new_app_dir)}")
-        return True
-    else:
-        if verbose:
-            print(f"App not found for renaming: {old_app_dir}")
-        return False
+    apps_processed = 0
+    
+    # Generate dynamic app paths based on the provided app name
+    APPS = get_app_paths(appname)
+    
+    # FIRST: Rename the main app bundle before processing anything else
+    main_app_renamed = False
+    for app in APPS:
+        if "Managed Software Center.app" in app["path"] and "new_path" in app:
+            if rename_app_bundle_safe(app_pkg, app["path"], app["new_path"]):
+                main_app_renamed = True
+                break
+    
+    # Now process all apps using their new paths
+    for app in APPS:
+        # Use the new path if available, otherwise use old path
+        app_path = app.get("new_path", app["path"])
+        app_dir = os.path.join(app_pkg, app_path)
+        
+        if os.path.exists(app_dir):
+            print(f"Processing {os.path.basename(app_dir)}...")
+            
+            # Remove signature before modifications
+            remove_signature(app_dir)
+            
+            # Update display name in Info.plist
+            update_app_display_name(app_dir, appname)
+            
+            # Create custom bundle identifier (important for macOS 26)
+            create_custom_bundle_identifier(app_dir, appname)
+            
+            # Update localized strings
+            resources_dir = os.path.join(app_dir, "Contents/Resources")
+            if os.path.exists(resources_dir):
+                lproj_dirs = glob.glob(os.path.join(resources_dir, "*.lproj"))
+                for lproj_dir in lproj_dirs:
+                    code = os.path.basename(lproj_dir).split(".")[0]
+                    if code in list(APPNAME_LOCALIZED.keys()):
+                        for root, dirs, files in os.walk(lproj_dir):
+                            for file_ in files:
+                                lfile = os.path.join(root, file_)
+                                if fnmatch.fnmatch(lfile, "*.strings"):
+                                    replace_strings(lfile, code, appname)
+            
+            # Handle icon replacement
+            if icon_file and icns:
+                for icon in app["icon"]:
+                    icon_path = os.path.join(app_dir, "Contents/Resources", icon)
+                    if os.path.isfile(icon_path):
+                        found_icon = icon
+                        break
+                if 'found_icon' in locals():
+                    dest = icon_path
+                    print(f"Replacing icons in {dest} with {icon_file}...")
+                    shutil.copyfile(icns, dest)
+            if icon_file and car:
+                car_path = os.path.join(app_dir, "Contents/Resources", "Assets.car")
+                if os.path.isfile(car_path):
+                    shutil.copyfile(car, car_path)
+                    print(f"Replacing icons in {car_path} with {car}...")
+            
+            # Re-sign app
+            sign_app(app_dir, sign_binaries)
+            
+            apps_processed += 1
+        else:
+            if verbose:
+                print(f"  App not found: {app_dir}")
+    
+    return apps_processed
 
 def sign_all_binaries(signing_id, root_dir, appname):
-    """Comprehensive binary signing from original script"""
+    """Comprehensive binary signing - updated for renamed apps"""
     print("Signing binaries (this may take a while)...")
     
     # Find all packages
@@ -455,7 +578,7 @@ def sign_all_binaries(signing_id, root_dir, appname):
     with open(ent_file, 'wb') as f:
         plistlib.dump(entitlements, f)
 
-    # Add the MSC app pkg binaries
+    # Use the actual renamed app path
     binaries = [
         os.path.join(
             app_payload,
@@ -510,8 +633,7 @@ def sign_all_binaries(signing_id, root_dir, appname):
         os.path.join(pybin, "python3"),
     ]
 
-    # Sign all the binaries. The order is important. Which is why this is a bit
-    # gross
+    # Sign all the binaries
     for binary in binaries:
         if os.path.exists(binary):
             if verbose:
@@ -560,16 +682,13 @@ def sign_package_as_user(pkg_path, signing_id, user=None):
     
     print(f"Signing package as user '{user}'...")
     
-    # Build the command to run as the user
     cmd = f'sudo -u {user} productsign --sign "{signing_id}" "{pkg_path}" "{signed_pkg}"'
     
     try:
-        # Run the signing command as the specified user
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if result.returncode == 0:
             print(f"Package signed successfully: {signed_pkg}")
             
-            # Verify the signature
             verify_cmd = f'sudo -u {user} pkgutil --check-signature "{signed_pkg}"'
             verify_result = subprocess.run(verify_cmd, shell=True, capture_output=True, text=True)
             if verify_result.returncode == 0:
@@ -585,34 +704,9 @@ def sign_package_as_user(pkg_path, signing_id, user=None):
         print(f"Signing error: {e}")
         return None
 
-def sign_apps_as_user(app_path, signing_id, user=None):
-    """Sign apps as the specified user"""
-    if not user:
-        user = get_current_user()
-    
-    print(f"📝 Signing apps as user '{user}'...")
-    
-    apps_to_sign = [
-        app_path,
-        os.path.join(app_path, "Contents/Helpers/MunkiStatus.app"),
-        os.path.join(app_path, "Contents/Helpers/munki-notifier.app")
-    ]
-    
-    for app in apps_to_sign:
-        if os.path.exists(app):
-            cmd = f'sudo -u {user} codesign --deep --force --options runtime --sign "{signing_id}" "{app}"'
-            try:
-                result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-                if result.returncode == 0:
-                    print(f"✅ Signed: {os.path.basename(app)}")
-                else:
-                    print(f"⚠️  Failed to sign {os.path.basename(app)}: {result.stderr}")
-            except Exception as e:
-                print(f"⚠️  Error signing {os.path.basename(app)}: {e}")
-
 def main():
     p = argparse.ArgumentParser(
-        description="Rebrands Munki's Managed Software Center for Swift-based MSC (Munki 7+)"
+        description="Rebrands Munki's Managed Software Center for Swift-based MSC (Munki 7+) - macOS 26 Compatible"
     )
 
     p.add_argument("-a", "--appname", required=True, help="Your desired app name for Managed Software Center")
@@ -640,21 +734,10 @@ def main():
     global verbose
     verbose = args.verbose
     
-    # Get the user for signing
     sign_user = args.user or get_current_user()
-    print(f"👤 Will sign packages as user: {sign_user}")
+    print(f"Will sign packages as user: {sign_user}")
 
-    # Set output filename
     outfilename = args.output_file or "munkitools"
-
-    # Generate app paths dynamically based on the provided app name
-    APPS = get_app_paths(args.appname)
-    
-    print(f"Using app name: {args.appname}")
-    if verbose:
-        print(f"Generated app paths:")
-        for app in APPS:
-            print(f"  {app['path']} -> {app.get('new_path', 'No rename')}")
 
     # Look for actool
     actool = next((x for x in ACTOOL if os.path.isfile(x)), None)
@@ -664,12 +747,10 @@ def main():
             "Munki 3.6 and higher. See README for more info."
         )
 
-    # Process icon file if provided - EXACT COPY from original script
-    icns = None
-    car = None
+    # Process icon file if provided
+    global icns, car
     if args.icon_file and os.path.isfile(args.icon_file):
         if icon_test(args.icon_file):
-            # Attempt to convert png to icns
             print("Converting .png file to .icns...")
             icns, car = convert_to_icns(args.icon_file, tmp_dir, actool=actool)
         else:
@@ -715,7 +796,6 @@ def main():
         if pkgref:
             munki_version = pkgref[0].attrib["version"]
         else:
-            # Fallback: try to get version from any pkg-ref
             pkgref = r.findall("pkg-ref")
             if pkgref:
                 munki_version = pkgref[0].attrib.get("version", "7.0.0")
@@ -724,83 +804,16 @@ def main():
     else:
         munki_version = "7.0.0"
 
-    # Process apps from all found packages
-    print(f"Replacing app name with {args.appname}...")
+    # Process apps with macOS 26 compatible approach
+    print(f"Rebranding Managed Software Center to {args.appname}...")
     
     apps_processed = 0
-    
     for app_pkg in app_packages:
         if verbose:
             print(f"Processing package: {os.path.basename(app_pkg)}")
         
-        # FIRST: Rename the main app bundle before processing anything else
-        main_app_renamed = False
-        for app in APPS:
-            if "Managed Software Center.app" in app["path"] and "new_path" in app:
-                if rename_app_bundle(app_pkg, app["path"], app["new_path"]):
-                    main_app_renamed = True
-                    break
-        
-        # Icon handling
-        for app in APPS:
-            # Use the new path if available, otherwise use old path
-            app_path = app.get("new_path", app["path"])
-            app_dir = os.path.join(app_pkg, app_path)
-            
-            if os.path.exists(app_dir):
-                print(f"Processing {os.path.basename(app_dir)}...")
-                
-                # Remove signature before modifications
-                remove_signature(app_dir)
-                
-                # Update display name in Info.plist
-                update_app_display_name(app_dir, args.appname)
-                
-                # Update localized strings - EXACT COPY from original script
-                resources_dir = os.path.join(app_dir, "Contents/Resources")
-                if os.path.exists(resources_dir):
-                    # Get a list of all the lproj dirs in each app's Resources dir
-                    lproj_dirs = glob.glob(os.path.join(resources_dir, "*.lproj"))
-                    for lproj_dir in lproj_dirs:
-                        # Determine lang code
-                        code = os.path.basename(lproj_dir).split(".")[0]
-                        # Don't try to change anything we don't know about
-                        if code in list(APPNAME_LOCALIZED.keys()):
-                            for root, dirs, files in os.walk(lproj_dir):
-                                for file_ in files:
-                                    lfile = os.path.join(root, file_)
-                                    if fnmatch.fnmatch(lfile, "*.strings"):
-                                        replace_strings(lfile, code, args.appname)
-                
-                # EXACT COPY from original script for icon replacement
-                if args.icon_file:
-                    if icns:
-                        for icon in app["icon"]:
-                            icon_path = os.path.join(app_dir, "Contents/Resources", icon)
-                            if os.path.isfile(icon_path):
-                                found_icon = icon
-                                break
-                        if 'found_icon' in locals():
-                            dest = icon_path
-                            print(f"Replacing icons in {dest} with {args.icon_file}...")
-                            shutil.copyfile(icns, dest)
-                    if car:
-                        car_path = os.path.join(app_dir, "Contents/Resources", "Assets.car")
-                        if os.path.isfile(car_path):
-                            shutil.copyfile(car, car_path)
-                            print(f"Replacing icons in {car_path} with {car}...")
-                
-                # Re-sign app with simple method first
-                sign_app(app_dir, args.sign_binaries)
-                
-                apps_processed += 1
-            else:
-                if verbose:
-                    print(f"  App not found: {app_dir}")
-
-    # Comprehensive binary signing if requested
-    if args.sign_binaries:
-        sign_all_binaries(args.sign_binaries, root_dir, args.appname)
+        processed = process_apps_for_macos26(app_pkg, args.appname, args.icon_file, args.sign_binaries)
+        apps_processed += processed
 
     if apps_processed == 0:
         print("No apps were processed! Checking package structure...")
@@ -834,13 +847,18 @@ def main():
             print("Package signing failed, using unsigned package")
             signed_pkg = final_pkg
 
-    # Sign apps if requested
+    # Comprehensive binary signing if requested
     if args.sign_binaries:
-        app_path = f"/Applications/{args.appname}.app"
-        sign_apps_as_user(app_path, args.sign_binaries, sign_user)
+        sign_all_binaries(args.sign_binaries, root_dir, args.appname)
 
-    print(f"Successfully created and installed: {signed_pkg}")
-    print(f"App name changed to: {args.appname}")
+    # Refresh LaunchServices to pick up changes
+    refresh_launch_services()
+    print("")
+    print(f"Successfully created: {signed_pkg}")
+    print(f"App renamed to: {args.appname}.app")
+    print(f"Bundle identifier updated for macOS 26 compatibility")
+    print("")
+    print("")
     if args.sign_package:
         print(f"Package signed with: {args.sign_package}")
     if args.sign_binaries:
