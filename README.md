@@ -40,4 +40,6 @@ options:
   sudo ./munki_rebrand_swift.py --appname "My New App Store" --icon-file New_App_Store_Icon.png --sign-package "Developer ID Installer: xxxxxx (S1234567P)" --user userwithcertificatesinkeychain -v
 ```
 
+You must have Xcode and Xcode tools installed to run this.
+
   
