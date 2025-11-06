@@ -3,6 +3,8 @@ Rebrands Munki 7+
 
 Based on the fantastic work from IT Services, University of Oxford (https://github.com/ox-it/munki-rebrand/blob/main/munki_rebrand.py)
 
+This is a temporary step while I am writing the process in Swift and as a macOS app. (Coming soon)
+
 
 ```
 sudo ./munki_rebrand_swift.py -h
