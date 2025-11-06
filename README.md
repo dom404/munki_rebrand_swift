@@ -43,8 +43,8 @@ options:
 
 You must have Xcode and Xcode tools installed to run this.
 
-Update 06-11-25:
-Fixed Custom Naming for acOS 26 (Sequoia)
-Better Checking on Files
+Update 06-11-25:  
+Fixed Custom Naming for acOS 26 (Sequoia)  
+Better Checking on Files  
 
   
