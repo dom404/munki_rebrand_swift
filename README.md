@@ -3,6 +3,7 @@ Rebrands Munki 7+
 
 Based on the fantastic work from IT Services, University of Oxford (https://github.com/ox-it/munki-rebrand/blob/main/munki_rebrand.py)
 
+
 ```
 sudo ./munki_rebrand_swift.py -h
 usage: munki_rebrand_swift.py [-h] -a APPNAME [-k PKG] [-i ICON_FILE] [--identifier IDENTIFIER] [-o OUTPUT_FILE] [-s SIGN_PACKAGE] [-S SIGN_BINARIES] [-u USER] [-v]
@@ -41,5 +42,9 @@ options:
 ```
 
 You must have Xcode and Xcode tools installed to run this.
+
+Update 06-11-25:
+Fixed Custom Naming for acOS 26 (Sequoia)
+Better Checking on Files
 
   
